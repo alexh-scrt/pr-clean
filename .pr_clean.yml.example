@@ -1,0 +1,134 @@
+# .pr_clean.yml.example
+#
+# Example configuration file for pr_clean.
+# Copy this file to .pr_clean.yml in the root of your repository and
+# customise the values below to suit your team's needs.
+#
+# pr_clean will automatically discover this file by walking up from the
+# current working directory.  You can also point to it explicitly:
+#
+#   pr_clean scan --config /path/to/.pr_clean.yml <PR_URL>
+#
+# All fields are optional.  Omitting a field uses the built-in default.
+
+# ---------------------------------------------------------------------------
+# severity_threshold
+# ---------------------------------------------------------------------------
+# Minimum severity level to include in reports.  Findings below this level
+# are silently ignored.
+#
+# Accepted values (case-insensitive):
+#   low       - Report everything (default)
+#   medium    - Skip low-severity informational findings
+#   high      - Only report high and critical findings
+#   critical  - Only report definitive injection markers
+#
+severity_threshold: low
+
+# ---------------------------------------------------------------------------
+# output_format
+# ---------------------------------------------------------------------------
+# Controls how scan results are presented.
+#
+# Accepted values:
+#   table  - Rich colour-coded table (default, great for humans)
+#   json   - Machine-readable JSON (ideal for CI pipelines and scripting)
+#
+output_format: table
+
+# ---------------------------------------------------------------------------
+# strip
+# ---------------------------------------------------------------------------
+# When true, pr_clean will remove detected injection blocks from the PR body
+# and any matching comments via the GitHub API.
+#
+# Default: false (scan-only; never modifies content without explicit opt-in)
+#
+strip: false
+
+# ---------------------------------------------------------------------------
+# fail_on_match
+# ---------------------------------------------------------------------------
+# When true, the CLI exits with code 1 whenever at least one injection match
+# is found.  This causes CI steps that run pr_clean to fail, blocking merges
+# until the PR is cleaned.
+#
+# Default: true
+#
+fail_on_match: true
+
+# ---------------------------------------------------------------------------
+# disable_patterns
+# ---------------------------------------------------------------------------
+# List of built-in pattern names to disable.  This is useful when a built-in
+# pattern produces too many false positives for your codebase.
+#
+# To see all available built-in pattern names run:
+#   pr_clean patterns list
+#
+# Example: disable the low-confidence "unsolicited_tips_header" pattern.
+#
+# disable_patterns:
+#   - unsolicited_tips_header
+#   - github_actions_bot_footer
+#
+disable_patterns: []
+
+# ---------------------------------------------------------------------------
+# patterns  (custom patterns)
+# ---------------------------------------------------------------------------
+# Add your own injection patterns here.  Each entry supports the following
+# fields:
+#
+#   regex          (required)  Python regex string.  IGNORECASE and MULTILINE
+#                              flags are applied by default.
+#   name           (optional)  Unique identifier; defaults to "custom_pattern_N".
+#   description    (optional)  Human-readable explanation.
+#   severity       (optional)  low | medium | high | critical  (default: medium)
+#   confidence     (optional)  Float 0.0–1.0 baseline confidence  (default: 0.75)
+#   category       (optional)  Grouping label  (default: "custom")
+#   strip_full_block (optional) true | false — strip the whole matched block
+#                              or just the matching line  (default: true)
+#   tags           (optional)  List of arbitrary tag strings for filtering.
+#
+# patterns:
+#   - name: my_internal_bot_block
+#     regex: 'START INTERNAL BOT OUTPUT.*?END INTERNAL BOT OUTPUT'
+#     description: Blocks injected by our internal release bot.
+#     severity: high
+#     confidence: 0.98
+#     category: internal_bot
+#     strip_full_block: true
+#     tags:
+#       - internal
+#       - bot
+#
+#   - name: jira_auto_link_noise
+#     regex: '\[AUTO\]\s+Linked\s+JIRA\s+issue\s+\w+-\d+'
+#     description: Auto-linked JIRA issue comments added by our bot.
+#     severity: low
+#     confidence: 0.70
+#     category: jira
+#     strip_full_block: false
+#
+patterns: []
+
+# ---------------------------------------------------------------------------
+# whitelist
+# ---------------------------------------------------------------------------
+# Suppress all findings for the specified repositories or PR authors.
+# Whitelisting a repo means pr_clean will exit 0 without scanning.
+# Whitelisting an author means any PR opened by that author is skipped.
+#
+# whitelist:
+#   repos:
+#     - my-org/sandbox-repo
+#     - my-org/docs
+#   authors:
+#     - dependabot[bot]
+#     - renovate[bot]
+#     - my-trusted-bot-account
+#
+whitelist:
+  repos: []
+  authors: []

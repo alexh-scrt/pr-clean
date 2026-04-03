@@ -1,0 +1,446 @@
+"""Built-in registry of known AI injection patterns for pr_clean.
+
+This module defines compiled regular expression patterns with associated metadata
+that describe known AI-injected promotional content, Copilot tips blocks,
+unsolicited agent output, and similar noise that can appear in pull request
+descriptions and comments.
+
+Each pattern entry is an :class:`InjectionPattern` dataclass instance that
+carries the compiled regex, a human-readable name, severity level, confidence
+score, and a brief description of what it matches.
+
+Typical usage::
+
+    from pr_clean.patterns import BUILTIN_PATTERNS, InjectionPattern
+
+    for pattern in BUILTIN_PATTERNS:
+        match = pattern.regex.search(markdown_text)
+        if match:
+            print(pattern.name, pattern.severity)
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import List, Optional
+
+
+class Severity(str, Enum):
+    """Severity levels for detected injection patterns.
+
+    Attributes:
+        LOW: Informational finding; unlikely to be disruptive.
+        MEDIUM: Moderate concern; likely promotional or noisy content.
+        HIGH: Strong signal of injected AI content; should be reviewed or stripped.
+        CRITICAL: Definitive injection marker (e.g. explicit agent tip block).
+    """
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+@dataclass
+class InjectionPattern:
+    """Metadata and compiled regex for a single injection detection pattern.
+
+    Attributes:
+        name: Unique, human-readable identifier for this pattern.
+        description: Short explanation of what content this pattern matches.
+        regex: Pre-compiled regular expression used to scan markdown text.
+        severity: How severe a match is considered (LOW/MEDIUM/HIGH/CRITICAL).
+        confidence: Float in [0.0, 1.0] representing baseline confidence that a
+            match is a true positive.
+        category: Broad category grouping (e.g. "copilot", "promotional",
+            "agent_output").
+        strip_full_block: Whether the entire matched block (possibly multi-line)
+            should be stripped rather than just the matching line.
+        tags: Arbitrary string tags for filtering.
+    """
+
+    name: str
+    description: str
+    regex: re.Pattern[str]
+    severity: Severity
+    confidence: float
+    category: str
+    strip_full_block: bool = True
+    tags: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Validate field values after initialisation.
+
+        Raises:
+            ValueError: If confidence is not in [0.0, 1.0].
+            ValueError: If name is empty.
+        """
+        if not self.name:
+            raise ValueError("InjectionPattern.name must not be empty.")
+        if not 0.0 <= self.confidence <= 1.0:
+            raise ValueError(
+                f"InjectionPattern.confidence must be in [0.0, 1.0], got {self.confidence!r}."
+            )
+
+
+def _compile(pattern: str, flags: int = re.IGNORECASE | re.MULTILINE) -> re.Pattern[str]:
+    """Compile a regex pattern string with standard flags.
+
+    Args:
+        pattern: Raw regex string to compile.
+        flags: Regex flags to apply; defaults to IGNORECASE | MULTILINE.
+
+    Returns:
+        Compiled :class:`re.Pattern` object.
+
+    Raises:
+        re.error: If the pattern string is not valid regex syntax.
+    """
+    return re.compile(pattern, flags)
+
+
+# ---------------------------------------------------------------------------
+# Built-in injection patterns
+# ---------------------------------------------------------------------------
+
+BUILTIN_PATTERNS: List[InjectionPattern] = [
+    # ------------------------------------------------------------------
+    # GitHub Copilot tip / agent blocks
+    # ------------------------------------------------------------------
+    InjectionPattern(
+        name="copilot_agent_tips_block",
+        description=(
+            "Matches the well-known 'START COPILOT CODING AGENT TIPS' / "
+            "'END COPILOT CODING AGENT TIPS' block injected by GitHub Copilot."
+        ),
+        regex=_compile(
+            r"START\s+COPILOT\s+CODING\s+AGENT\s+TIPS.*?END\s+COPILOT\s+CODING\s+AGENT\s+TIPS",
+            re.IGNORECASE | re.DOTALL,
+        ),
+        severity=Severity.CRITICAL,
+        confidence=0.99,
+        category="copilot",
+        strip_full_block=True,
+        tags=["copilot", "agent", "tips", "block"],
+    ),
+    InjectionPattern(
+        name="copilot_tips_header",
+        description="Matches a bare 'COPILOT CODING AGENT TIPS' heading line.",
+        regex=_compile(r"^.*COPILOT\s+CODING\s+AGENT\s+TIPS.*$"),
+        severity=Severity.HIGH,
+        confidence=0.97,
+        category="copilot",
+        strip_full_block=False,
+        tags=["copilot", "agent", "tips"],
+    ),
+    InjectionPattern(
+        name="copilot_generated_marker",
+        description="Matches 'Generated by GitHub Copilot' attribution lines.",
+        regex=_compile(r"generated\s+by\s+github\s+copilot"),
+        severity=Severity.HIGH,
+        confidence=0.95,
+        category="copilot",
+        strip_full_block=False,
+        tags=["copilot", "generated", "attribution"],
+    ),
+    InjectionPattern(
+        name="copilot_summary_header",
+        description="Matches 'Copilot Summary' section headers injected into PR bodies.",
+        regex=_compile(r"^#+\s*copilot\s+(summary|description|analysis)\s*$"),
+        severity=Severity.HIGH,
+        confidence=0.90,
+        category="copilot",
+        strip_full_block=True,
+        tags=["copilot", "summary", "header"],
+    ),
+    # ------------------------------------------------------------------
+    # Generic AI / LLM agent output markers
+    # ------------------------------------------------------------------
+    InjectionPattern(
+        name="ai_generated_disclaimer",
+        description="Matches common 'AI-generated' or 'auto-generated' disclaimer phrases.",
+        regex=_compile(
+            r"(this\s+(pr\s+)?description\s+was\s+)?(auto|ai)[-\s]generated"
+        ),
+        severity=Severity.MEDIUM,
+        confidence=0.85,
+        category="ai_disclaimer",
+        strip_full_block=False,
+        tags=["ai", "generated", "disclaimer"],
+    ),
+    InjectionPattern(
+        name="llm_agent_start_marker",
+        description="Matches generic 'START [AGENT/BOT/AI] OUTPUT' block delimiters.",
+        regex=_compile(
+            r"START\s+(AGENT|BOT|AI|LLM|ASSISTANT)\s+(OUTPUT|BLOCK|CONTENT|TIPS|NOTES)",
+            re.IGNORECASE | re.DOTALL,
+        ),
+        severity=Severity.CRITICAL,
+        confidence=0.98,
+        category="agent_output",
+        strip_full_block=True,
+        tags=["agent", "bot", "llm", "block"],
+    ),
+    InjectionPattern(
+        name="llm_agent_end_marker",
+        description="Matches generic 'END [AGENT/BOT/AI] OUTPUT' block delimiters.",
+        regex=_compile(
+            r"END\s+(AGENT|BOT|AI|LLM|ASSISTANT)\s+(OUTPUT|BLOCK|CONTENT|TIPS|NOTES)",
+            re.IGNORECASE | re.DOTALL,
+        ),
+        severity=Severity.HIGH,
+        confidence=0.95,
+        category="agent_output",
+        strip_full_block=True,
+        tags=["agent", "bot", "llm", "block"],
+    ),
+    InjectionPattern(
+        name="chatgpt_response_marker",
+        description="Matches phrases characteristic of raw ChatGPT / GPT-4 response preamble.",
+        regex=_compile(
+            r"(as\s+an\s+ai\s+(language\s+)?model|i\s+am\s+an\s+ai|i\s+'?m\s+an\s+ai)"
+        ),
+        severity=Severity.HIGH,
+        confidence=0.92,
+        category="ai_disclaimer",
+        strip_full_block=False,
+        tags=["chatgpt", "gpt", "openai", "disclaimer"],
+    ),
+    # ------------------------------------------------------------------
+    # Promotional / marketing injection
+    # ------------------------------------------------------------------
+    InjectionPattern(
+        name="promotional_upgrade_cta",
+        description="Matches unsolicited upgrade / upsell calls-to-action.",
+        regex=_compile(
+            r"(upgrade\s+to\s+(pro|premium|enterprise)|try\s+(pro|premium|enterprise)\s+for\s+free|\bget\s+more\s+with\s+(copilot|github)\s+(pro|enterprise)\b)"
+        ),
+        severity=Severity.HIGH,
+        confidence=0.88,
+        category="promotional",
+        strip_full_block=False,
+        tags=["promotional", "upsell", "cta"],
+    ),
+    InjectionPattern(
+        name="promotional_powered_by",
+        description="Matches 'Powered by [product]' promotional footers.",
+        regex=_compile(
+            r"powered\s+by\s+(github\s+copilot|openai|chatgpt|claude|gemini|anthropic)"
+        ),
+        severity=Severity.MEDIUM,
+        confidence=0.82,
+        category="promotional",
+        strip_full_block=False,
+        tags=["promotional", "branding", "powered-by"],
+    ),
+    InjectionPattern(
+        name="promotional_learn_more_link",
+        description="Matches 'Learn more about Copilot/AI features' style promotional links.",
+        regex=_compile(
+            r"learn\s+more\s+about\s+(github\s+copilot|copilot|ai\s+features?|openai)"
+        ),
+        severity=Severity.MEDIUM,
+        confidence=0.80,
+        category="promotional",
+        strip_full_block=False,
+        tags=["promotional", "link", "learn-more"],
+    ),
+    # ------------------------------------------------------------------
+    # Copilot workspace / inline suggestion artefacts
+    # ------------------------------------------------------------------
+    InjectionPattern(
+        name="copilot_workspace_block",
+        description="Matches Copilot Workspace session JSON/YAML artefact blocks.",
+        regex=_compile(
+            r"copilot[_\-\s]workspace[_\-\s](session|plan|spec|task)",
+            re.IGNORECASE | re.DOTALL,
+        ),
+        severity=Severity.HIGH,
+        confidence=0.93,
+        category="copilot",
+        strip_full_block=True,
+        tags=["copilot", "workspace", "artefact"],
+    ),
+    InjectionPattern(
+        name="copilot_inline_suggestion_marker",
+        description="Matches HTML comment markers that Copilot inserts for inline suggestions.",
+        regex=_compile(
+            r"<!--\s*(copilot[_\-\s]suggestion|github[_\-\s]copilot)[^>]*-->",
+            re.IGNORECASE | re.DOTALL,
+        ),
+        severity=Severity.MEDIUM,
+        confidence=0.87,
+        category="copilot",
+        strip_full_block=False,
+        tags=["copilot", "html-comment", "suggestion"],
+    ),
+    # ------------------------------------------------------------------
+    # Generic bot / automation noise
+    # ------------------------------------------------------------------
+    InjectionPattern(
+        name="auto_summary_section",
+        description="Matches auto-generated 'Summary' or 'Changes' sections added by bots.",
+        regex=_compile(
+            r"^#+\s*(auto[-\s]generated|automatically\s+generated)\s+(summary|description|changelog|changes)\s*$"
+        ),
+        severity=Severity.HIGH,
+        confidence=0.89,
+        category="bot_noise",
+        strip_full_block=True,
+        tags=["auto-generated", "summary", "header"],
+    ),
+    InjectionPattern(
+        name="bot_do_not_edit_comment",
+        description="Matches 'DO NOT EDIT - auto-generated' comment banners.",
+        regex=_compile(
+            r"do\s+not\s+edit\s*[:\-]?\s*(this\s+(section|block|content)\s+was\s+)?(auto|automatically)[-\s]generated"
+        ),
+        severity=Severity.MEDIUM,
+        confidence=0.84,
+        category="bot_noise",
+        strip_full_block=False,
+        tags=["auto-generated", "do-not-edit", "banner"],
+    ),
+    InjectionPattern(
+        name="unsolicited_tips_header",
+        description="Matches generic unsolicited 'Tips', 'Suggestions', or 'Recommendations' headings injected by agents.",
+        regex=_compile(
+            r"^#+\s*(tips\s+and\s+tricks|helpful\s+tips|pro\s+tips|recommendations?|suggestions?)\s*$"
+        ),
+        severity=Severity.LOW,
+        confidence=0.60,
+        category="bot_noise",
+        strip_full_block=True,
+        tags=["tips", "suggestions", "header"],
+    ),
+    # ------------------------------------------------------------------
+    # GitHub Actions / CI bot injection
+    # ------------------------------------------------------------------
+    InjectionPattern(
+        name="github_actions_bot_footer",
+        description="Matches standard GitHub Actions bot attribution footers on PR comments.",
+        regex=_compile(
+            r"<sub>\s*(posted|generated|created)\s+by\s+(github\s+actions?|a\s+bot)\s*</sub>"
+        ),
+        severity=Severity.LOW,
+        confidence=0.75,
+        category="bot_noise",
+        strip_full_block=False,
+        tags=["github-actions", "bot", "footer"],
+    ),
+    InjectionPattern(
+        name="coderabbit_review_block",
+        description="Matches CodeRabbit AI review summary blocks.",
+        regex=_compile(
+            r"(<!-- coderabbit|coderabbit\s+ai\s+review|\[!CODERABBIT\])",
+            re.IGNORECASE | re.DOTALL,
+        ),
+        severity=Severity.MEDIUM,
+        confidence=0.91,
+        category="ai_review_bot",
+        strip_full_block=True,
+        tags=["coderabbit", "ai-review", "bot"],
+    ),
+]
+
+
+def get_pattern_by_name(name: str) -> Optional[InjectionPattern]:
+    """Look up a built-in pattern by its unique name.
+
+    Args:
+        name: The :attr:`InjectionPattern.name` to search for.
+
+    Returns:
+        The matching :class:`InjectionPattern`, or ``None`` if not found.
+    """
+    for pattern in BUILTIN_PATTERNS:
+        if pattern.name == name:
+            return pattern
+    return None
+
+
+def get_patterns_by_category(category: str) -> List[InjectionPattern]:
+    """Return all built-in patterns belonging to the given category.
+
+    Args:
+        category: Category string to filter on (e.g. ``"copilot"``).
+
+    Returns:
+        List of matching :class:`InjectionPattern` instances (may be empty).
+    """
+    return [p for p in BUILTIN_PATTERNS if p.category == category]
+
+
+def get_patterns_by_severity(severity: Severity) -> List[InjectionPattern]:
+    """Return all built-in patterns at or above the given severity level.
+
+    The ordering from lowest to highest is: LOW < MEDIUM < HIGH < CRITICAL.
+
+    Args:
+        severity: Minimum :class:`Severity` threshold.
+
+    Returns:
+        List of :class:`InjectionPattern` instances whose severity is at or
+        above the given threshold.
+    """
+    order = [Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL]
+    min_index = order.index(severity)
+    return [p for p in BUILTIN_PATTERNS if order.index(p.severity) >= min_index]
+
+
+def build_custom_pattern(
+    name: str,
+    pattern_str: str,
+    description: str = "",
+    severity: str = "medium",
+    confidence: float = 0.75,
+    category: str = "custom",
+    strip_full_block: bool = True,
+    tags: Optional[List[str]] = None,
+    flags: int = re.IGNORECASE | re.MULTILINE,
+) -> InjectionPattern:
+    """Construct a custom :class:`InjectionPattern` from plain-text parameters.
+
+    This is used by the config loader to turn user-supplied YAML pattern
+    definitions into proper :class:`InjectionPattern` instances.
+
+    Args:
+        name: Unique identifier for the pattern.
+        pattern_str: Raw regex string to compile.
+        description: Human-readable description of what this pattern matches.
+        severity: Severity level string (``"low"``, ``"medium"``, ``"high"``,
+            or ``"critical"``). Defaults to ``"medium"``.
+        confidence: Baseline confidence score in [0.0, 1.0]. Defaults to 0.75.
+        category: Category grouping string. Defaults to ``"custom"``.
+        strip_full_block: Whether to strip the entire matched block.
+        tags: Optional list of tag strings.
+        flags: Regex compile flags.
+
+    Returns:
+        A fully initialised :class:`InjectionPattern`.
+
+    Raises:
+        ValueError: If the severity string is not a valid :class:`Severity` member.
+        re.error: If ``pattern_str`` is not valid regex syntax.
+    """
+    try:
+        sev = Severity(severity.lower())
+    except ValueError:
+        valid = [s.value for s in Severity]
+        raise ValueError(
+            f"Invalid severity {severity!r}. Must be one of: {valid}."
+        )
+
+    compiled = re.compile(pattern_str, flags)
+    return InjectionPattern(
+        name=name,
+        description=description,
+        regex=compiled,
+        severity=sev,
+        confidence=confidence,
+        category=category,
+        strip_full_block=strip_full_block,
+        tags=tags or [],
+    )
