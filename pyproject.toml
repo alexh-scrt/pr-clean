@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "pr_clean"
+version = "0.1.0"
+description = "A CLI tool and GitHub Action that scans pull request descriptions and comments for AI-injected promotional content and known injection patterns."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [
+    { name = "pr_clean contributors" }
+]
+keywords = ["github", "pull-request", "ai", "copilot", "code-review", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "click>=8.1.0",
+    "PyGithub>=2.1.0",
+    "rich>=13.0.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+]
+
+[project.scripts]
+pr_clean = "pr_clean.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/pr-clean/pr_clean"
+Repository = "https://github.com/pr-clean/pr_clean"
+Issues = "https://github.com/pr-clean/pr_clean/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pr_clean*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["pr_clean"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 70
