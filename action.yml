@@ -1,0 +1,306 @@
+# action.yml
+# GitHub Actions composite action definition for pr_clean.
+#
+# This action scans pull request descriptions and comments for AI-injected
+# promotional content, Copilot tips blocks, and other known injection patterns.
+# It can report findings as a rich table or JSON, optionally strip detected
+# blocks, and post a summary comment on the pull request.
+#
+# Usage in a workflow:
+#
+#   - uses: pr-clean/pr_clean@v0.1.0
+#     with:
+#       github-token: ${{ secrets.GITHUB_TOKEN }}
+#       severity-threshold: medium
+#       fail-on-match: 'true'
+#       strip: 'false'
+#       output-format: table
+
+name: pr_clean
+description: >
+  Scan pull request descriptions and comments for AI-injected promotional
+  content, Copilot tips blocks, and unsolicited agent output.  Flags suspicious
+  blocks with detailed reports and can automatically strip them to keep PR
+  discussions clean and human-authored.
+
+author: pr_clean contributors
+
+branding:
+  icon: shield
+  color: blue
+
+# ---------------------------------------------------------------------------
+# Inputs
+# ---------------------------------------------------------------------------
+inputs:
+  github-token:
+    description: >
+      GitHub token used to fetch the pull request body, read comments, and
+      optionally post a summary comment or push cleaned content back.
+      Defaults to the automatically provided GITHUB_TOKEN secret.
+    required: false
+    default: ${{ github.token }}
+
+  pr-url:
+    description: >
+      Full GitHub pull request URL or 'owner/repo#number' shorthand.
+      Defaults to the pull request that triggered this workflow event.
+    required: false
+    default: ${{ github.event.pull_request.html_url }}
+
+  severity-threshold:
+    description: >
+      Minimum severity level to report.  One of: low, medium, high, critical.
+      Findings below this level are silently ignored.
+    required: false
+    default: low
+
+  output-format:
+    description: >
+      Output format for the scan report.  One of: table, json.
+      'table' renders a human-readable Rich colour-coded table.
+      'json' emits machine-readable JSON suitable for downstream processing.
+    required: false
+    default: table
+
+  fail-on-match:
+    description: >
+      When 'true', the action exits with a non-zero status code when at least
+      one injection pattern is detected.  This causes the CI check to fail and
+      blocks merging until the PR description is cleaned.
+    required: false
+    default: 'true'
+
+  strip:
+    description: >
+      When 'true', detected injection blocks are surgically removed from the
+      PR body and any matching comments via the GitHub API.  Requires the
+      github-token to have 'repo' write scope.
+    required: false
+    default: 'false'
+
+  post-comment:
+    description: >
+      When 'true', post a summary comment on the pull request with the list
+      of findings (even when no injections are found, a clean-bill-of-health
+      comment is posted).
+    required: false
+    default: 'false'
+
+  config-file:
+    description: >
+      Path to a custom .pr_clean.yml configuration file inside the repository.
+      When omitted, pr_clean will search the repository root and parent
+      directories automatically.
+    required: false
+    default: ''
+
+  python-version:
+    description: >
+      Python version to use when setting up the runtime environment.
+      Must be 3.9 or higher.
+    required: false
+    default: '3.11'
+
+  install-extras:
+    description: >
+      Additional pip install arguments appended after 'pip install pr_clean'.
+      Useful for pinning a specific version, e.g. 'pr_clean==0.1.0'.
+    required: false
+    default: ''
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+outputs:
+  match-count:
+    description: Number of injection patterns detected in the PR body and comments.
+    value: ${{ steps.scan.outputs.match_count }}
+
+  clean:
+    description: >
+      'true' when no injection patterns were detected; 'false' otherwise.
+    value: ${{ steps.scan.outputs.clean }}
+
+  json-report:
+    description: JSON-encoded scan results suitable for downstream processing.
+    value: ${{ steps.scan.outputs.json_report }}
+
+# ---------------------------------------------------------------------------
+# Runs (composite)
+# ---------------------------------------------------------------------------
+runs:
+  using: composite
+
+  steps:
+    # ------------------------------------------------------------------
+    # 1. Set up Python
+    # ------------------------------------------------------------------
+    - name: Set up Python ${{ inputs.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    # ------------------------------------------------------------------
+    # 2. Install pr_clean
+    # ------------------------------------------------------------------
+    - name: Install pr_clean
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f "${{ github.workspace }}/pyproject.toml" ]; then
+          # Running inside the pr_clean repository itself — install from source.
+          python -m pip install --quiet "${{ github.workspace }}[dev]"
+        else
+          # Install from PyPI (or the caller's extras override).
+          INSTALL_TARGET="pr_clean"
+          if [ -n "${{ inputs.install-extras }}" ]; then
+            INSTALL_TARGET="${{ inputs.install-extras }}"
+          fi
+          python -m pip install --quiet "${INSTALL_TARGET}"
+        fi
+
+    # ------------------------------------------------------------------
+    # 3. Determine config flag
+    # ------------------------------------------------------------------
+    - name: Resolve config flag
+      id: config_flag
+      shell: bash
+      run: |
+        CONFIG_FLAG=""
+        if [ -n "${{ inputs.config-file }}" ]; then
+          CONFIG_FLAG="--config ${{ inputs.config-file }}"
+        fi
+        echo "config_flag=${CONFIG_FLAG}" >> "$GITHUB_OUTPUT"
+
+    # ------------------------------------------------------------------
+    # 4. Run scan and capture output
+    # ------------------------------------------------------------------
+    - name: Scan PR for injection patterns
+      id: scan
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        PR_CLEAN_PR_URL: ${{ inputs.pr-url }}
+        PR_CLEAN_SEVERITY: ${{ inputs.severity-threshold }}
+        PR_CLEAN_FORMAT: ${{ inputs.output-format }}
+        PR_CLEAN_FAIL: ${{ inputs.fail-on-match }}
+        PR_CLEAN_STRIP: ${{ inputs.strip }}
+      run: |
+        set +e  # Don't exit immediately on non-zero; we capture the exit code.
+
+        # Build the pr_clean command.
+        CMD="pr_clean scan"
+        CMD="${CMD} --url \"${PR_CLEAN_PR_URL}\""
+        CMD="${CMD} --severity \"${PR_CLEAN_SEVERITY}\""
+        CMD="${CMD} --format \"${PR_CLEAN_FORMAT}\""
+        CMD="${CMD} ${{ steps.config_flag.outputs.config_flag }}"
+
+        if [ "${PR_CLEAN_FAIL}" = "false" ]; then
+          CMD="${CMD} --no-fail"
+        fi
+
+        echo "Running: ${CMD}"
+        eval "${CMD}"
+        SCAN_EXIT=$?
+
+        # Capture a JSON report for the outputs regardless of format.
+        JSON_CMD="pr_clean scan"
+        JSON_CMD="${JSON_CMD} --url \"${PR_CLEAN_PR_URL}\""
+        JSON_CMD="${JSON_CMD} --severity \"${PR_CLEAN_SEVERITY}\""
+        JSON_CMD="${JSON_CMD} --format json"
+        JSON_CMD="${JSON_CMD} --no-fail"
+        JSON_CMD="${JSON_CMD} ${{ steps.config_flag.outputs.config_flag }}"
+
+        JSON_OUTPUT=$(eval "${JSON_CMD}" 2>/dev/null || echo '{"match_count":0,"matches":[]}')
+        MATCH_COUNT=$(echo "${JSON_OUTPUT}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('match_count',0))" 2>/dev/null || echo 0)
+
+        if [ "${MATCH_COUNT}" = "0" ]; then
+          CLEAN="true"
+        else
+          CLEAN="false"
+        fi
+
+        # Write to GITHUB_OUTPUT
+        echo "match_count=${MATCH_COUNT}" >> "$GITHUB_OUTPUT"
+        echo "clean=${CLEAN}" >> "$GITHUB_OUTPUT"
+        # Encode JSON to a single line for the output variable.
+        JSON_ONELINE=$(echo "${JSON_OUTPUT}" | tr -d '\n')
+        echo "json_report=${JSON_ONELINE}" >> "$GITHUB_OUTPUT"
+
+        exit ${SCAN_EXIT}
+
+    # ------------------------------------------------------------------
+    # 5. Strip injection blocks (optional)
+    # ------------------------------------------------------------------
+    - name: Strip injection blocks
+      if: inputs.strip == 'true' && steps.scan.outputs.clean == 'false'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        pr_clean strip \
+          --url "${{ inputs.pr-url }}" \
+          --severity "${{ inputs.severity-threshold }}" \
+          --push \
+          ${{ steps.config_flag.outputs.config_flag }} \
+          --no-fail
+
+    # ------------------------------------------------------------------
+    # 6. Post summary comment (optional)
+    # ------------------------------------------------------------------
+    - name: Post summary comment
+      if: inputs.post-comment == 'true'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        MATCH_COUNT="${{ steps.scan.outputs.match_count }}"
+        CLEAN="${{ steps.scan.outputs.clean }}"
+
+        if [ "${CLEAN}" = "true" ]; then
+          BODY="## ✅ pr_clean — No injection patterns detected\n\nThis pull request description and comments appear to be free of AI-injected promotional content, Copilot tips blocks, and other known injection patterns."
+        else
+          BODY="## 🚨 pr_clean — ${MATCH_COUNT} injection pattern(s) detected\n\nThis pull request contains suspected AI-injected content.  Please review the pr_clean scan report in the CI logs and remove any flagged sections.\n\n> Run \`pr_clean strip --url <PR_URL>\` locally to automatically clean the PR description."
+        fi
+
+        # Use the GitHub API to post the comment.
+        REPO="${{ github.repository }}"
+        PR_NUMBER="${{ github.event.pull_request.number }}"
+        API_URL="https://api.github.com/repos/${REPO}/issues/${PR_NUMBER}/comments"
+
+        curl -s -X POST \
+          -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          -d "{\"body\": \"${BODY}\"}" \
+          "${API_URL}" > /dev/null
+
+    # ------------------------------------------------------------------
+    # 7. Write Job Summary
+    # ------------------------------------------------------------------
+    - name: Write job summary
+      if: always()
+      shell: bash
+      run: |
+        MATCH_COUNT="${{ steps.scan.outputs.match_count }}"
+        CLEAN="${{ steps.scan.outputs.clean }}"
+
+        echo "## pr_clean Scan Results" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "${CLEAN}" = "true" ]; then
+          echo "✅ **No injection patterns detected.**" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "The pull request description and comments appear clean." >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "🚨 **${MATCH_COUNT} injection pattern(s) detected.**" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Setting | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Severity threshold | ${{ inputs.severity-threshold }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Strip mode | ${{ inputs.strip }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Fail on match | ${{ inputs.fail-on-match }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "See the step log above for the full scan report." >> "$GITHUB_STEP_SUMMARY"
+        fi
